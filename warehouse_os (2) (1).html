@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Smart Warehouse OS</title>
+<style>
+:root{--bg:#0b0f14;--p:#12181f;--l:#223041;--t:#d7e0e8;--d:#7f92a3;--a:#ffb020;--c:#4dd6d0;--r:#ff5c5c}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--t);font:13px "Segoe UI",system-ui,sans-serif;display:flex;height:100vh}
+aside{width:300px;padding:14px;border-right:1px solid var(--l);overflow:auto;flex-shrink:0}
+main{flex:1;padding:14px;overflow:auto}
+h1{font-size:17px;margin:0 0 2px}.sub{color:var(--d);font-size:11.5px;margin-bottom:8px}
+h2{font-size:11px;color:var(--d);font-weight:600;margin:14px 0 6px;text-transform:uppercase;letter-spacing:.5px}
+.card{background:var(--p);border:1px solid var(--l);border-radius:6px;padding:7px;margin-bottom:6px}
+.row{display:flex;gap:5px;align-items:center;margin-bottom:5px}
+input,select{background:#0d1319;border:1px solid var(--l);color:var(--t);border-radius:4px;padding:4px 5px;font:inherit}
+input[type=text]{flex:1;min-width:0}input[type=number]{width:46px}
+button{background:var(--p);border:1px solid var(--l);color:var(--t);border-radius:5px;padding:7px 9px;cursor:pointer;font:inherit}
+button:hover{border-color:var(--c)}button.go{background:var(--a);color:#1a1200;border:0;font-weight:700;width:100%;margin-bottom:6px}
+button.on{border-color:var(--a);color:var(--a)}.btns{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px}
+.x{background:none;border:0;color:var(--d);padding:0 4px}
+canvas{background:#0d1319;border:1px solid var(--l);border-radius:8px;max-width:100%;display:block}
+.mono{font-family:Consolas,monospace;font-size:11.5px;line-height:1.65;color:var(--d)}
+.box{background:var(--p);border:1px solid var(--l);border-radius:6px;padding:8px;margin-top:6px;min-height:34px}
+table{border-collapse:collapse;width:100%}td,th{padding:2px 6px;text-align:left;font-size:11.5px;border-bottom:1px solid var(--l)}
+th{color:var(--c);font-weight:600}.bar{height:8px;border-radius:3px;display:inline-block;vertical-align:middle}
+.ok{color:#3ddc97}.bad{color:var(--r)}.wrap{display:flex;gap:14px;flex-wrap:wrap}.wrap>div{flex:1;min-width:300px}
+</style></head><body>
+<aside>
+<h1>Smart Warehouse OS</h1><div class="sub">hospital supply robots: robots are processes, shelves and lanes are resources</div>
+<h2>Tasks</h2><div id="tl"></div>
+<button id="add" style="width:100%;margin-bottom:8px">+ add task</button>
+<div class="row"><span style="flex:1">Robot pool</span><input type="number" id="pool" value="7" min="1" max="20"></div>
+<div class="row"><span style="flex:1">Round robin quantum (ticks)</span><input type="number" id="q" value="3" min="1" max="10"></div>
+<div class="row"><span style="flex:1">Scheduler</span><select id="mode"><option value="full">Priority + aging + RR</option><option value="pri">Priority only</option><option value="fcfs">FCFS</option><option value="edf">EDF (earliest deadline)</option></select></div>
+<button class="go" id="go">Dispatch robots</button>
+<div class="btns"><button id="pause">Pause</button><button id="step">Step</button><button id="reset">Reset</button></div>
+<div class="row"><span>Speed</span><input type="range" id="spd" min="120" max="1400" value="700" style="flex:1;direction:rtl"></div>
+<h2>Live orders (arrive while running)</h2><div class="row"><select id="ot" style="flex:1"></select><input type="number" id="on" value="2" min="1" max="6"><button id="oadd">Add</button></div>
+<h2>Layout</h2>
+<div class="btns"><button id="shl">Place / remove shelves</button><button id="obs">Place obstacles</button><button id="clr">Clear obstacles</button></div>
+<div class="mono" id="hint" style="margin-bottom:6px"></div>
+<h2>Analysis</h2>
+<div class="btns"><button id="cmp">Compare algorithms</button><button id="tst">Run 300 random tests</button><button id="csv">Export CSV</button></div>
+<h2>Allocation</h2><div id="alloc" class="mono">Dispatch to see allocation.</div>
+</aside>
+<main>
+<canvas id="cv" width="560" height="560"></canvas>
+<div class="wrap"><div>
+<h2>Scheduling decisions</h2><div id="log" class="box mono">Dispatch to start.</div>
+<h2>Process table (PCB)</h2><div id="pcb" class="box mono"></div></div>
+<div><h2>Stats by priority</h2><div id="stats" class="box mono"></div>
+<h2>Shelf usage (Gantt)</h2><canvas id="gt" width="400" height="60" style="width:100%"></canvas>
+<h2>Integrity check</h2><div id="chk" class="box mono">No violations.</div></div></div>
+<h2>Algorithm comparison</h2><div id="cmpout" class="box mono">Click "Compare algorithms" to run the same scenario under FCFS, Priority, and Priority+aging+RR.</div>
+<h2>Randomized tests</h2><div id="tout" class="box mono"></div>
+</main>
+<script>
+// ===== constants & layout =====
+const G=10,DOCK={x:0,y:2},OUT={x:9,y:8},DWELL=3,AGE=6,CAP=600;
+// Shelves are placed and named by the user (click the grid), then each task is assigned to a shelf.
+// Scattered shelves make robot routes cross and merge, which is where the scheduler has to decide.
+let shelvesDef=[{name:"Blood bank",x:6,y:3},{name:"Surgery store",x:2,y:6},{name:"Linen room",x:4,y:4}];
+const COL=["#ff5c5c","#4da6ff","#3ddc97","#c77dff","#ffb020","#4dd6d0","#ff8fc7","#b6c24a"];
+const $=id=>document.getElementById(id),K=(x,y)=>x+","+y;
+let tasks=[{name:"Blood samples",pr:1,n:3,dl:28,sh:0},{name:"Surgical kits",pr:2,n:2,dl:38,sh:1},{name:"Linen",pr:3,n:2,dl:0,sh:2}];
+let obst=new Map(),placing=null,S=null,running=false,last=0,tickMs=700;
+
+// ===== pathfinding: BFS using only right/up moves => flow is acyclic, so deadlock is impossible by design =====
+function bfs(a,b,bl){const q=[a],prev={[K(a.x,a.y)]:null};
+ while(q.length){const c=q.shift();if(c.x==b.x&&c.y==b.y)break;
+  for(const[dx,dy]of[[1,0],[0,1]]){const n={x:c.x+dx,y:c.y+dy},k=K(n.x,n.y);
+   if(n.x>b.x||n.y>b.y||bl(n)||k in prev)continue;prev[k]=c;q.push(n);}}
+ if(!(K(b.x,b.y)in prev))return null;const o=[];for(let c=b;c;c=prev[K(c.x,c.y)])o.unshift(c);return o;}
+// Dock -> approach shelf from the FRONT (below) -> shelf cell -> leave from the BACK (above) -> Loadout
+function route(sx,sy,bl){const s={x:sx,y:sy};if(bl(s))return null;
+ const a=bfs(DOCK,{x:sx,y:sy-1},bl),up={x:sx,y:sy+1};if(!a||bl(up))return null;
+ const b=bfs(up,OUT,bl);return b?[...a,s,...b]:null;}
+
+// ===== simulation =====
+function makeSim(tk,pool,mode,ob,Q){
+ const ord=tk.map((t,i)=>({pr:t.pr,n:t.n,i})).sort((a,b)=>a.pr-b.pr);
+ let rem=pool;const alloc=tk.map(()=>0);
+ ord.forEach(t=>{alloc[t.i]=Math.min(t.n,rem);rem-=alloc[t.i];}); // higher priority gets robots first
+ const shelves=shelvesDef.map(s=>({...s}));
+ const sc=new Set(shelves.map(s=>K(s.x,s.y))),robots=[],routes=[],rsh=[];let id=1;
+ tk.forEach((t,i)=>{const sh=shelves[t.sh]||shelves[0];
+  const bl=p=>ob.has(K(p.x,p.y))||(sc.has(K(p.x,p.y))&&!(p.x==sh.x&&p.y==sh.y));
+  const r=route(sh.x,sh.y,bl);
+  routes[i]=r;rsh[i]=shelves.indexOf(sh);for(let k=0;k<alloc[i];k++)robots.push(mkR(id++,i,t.pr,r,sh,t.dl||0,0,rsh[i]));});
+ return{mode,Q,robots,shelves,alloc,routes,rsh,nid:id,tick:0,log:[],viol:[],gantt:shelves.map(()=>[])};}
+// t0 = arrival tick (orders can arrive while running); dl = deadline in ticks after arrival (0 = none)
+function mkR(id,i,pr,r,sh,dl,t0,shel){return{id,task:i,shel,pr,path:r,si:r?r.findIndex(c=>c.x==sh.x&&c.y==sh.y):-1,idx:-1,cw:0,wt:0,dw:0,
+ state:r?"ready":"unreachable",done:!r,fin:0,prev:null,pcell:null,col:COL[i%8],lastB:null,t0,dl:dl?t0+dl:0,late:false};}
+
+const effP=(S,r)=>S.mode=="full"?Math.max(0,r.pr-Math.floor(r.cw/AGE)):r.pr; // priority aging
+function note(S,r,b,occupied){if(r.lastB===b.id)return;r.lastB=b.id;
+ const why=occupied?`queued behind R${b.id} (cell occupied, single lane)`:S.mode=="edf"?"earliest deadline first (EDF)":S.mode=="fcfs"?"FCFS: earlier arrival first"
+  :b.pr<r.pr?"higher priority has right of way":b.pr==r.pr?"equal priority, round robin decides":"aged priority outranks";
+ S.log.unshift(`T${S.tick} R${r.id}(P${r.pr}) waits for R${b.id}(P${b.pr}) - ${why}`);if(S.log.length>10)S.log.pop();}
+
+function stepSim(S){
+ const T=++S.tick,live=S.robots.filter(r=>!r.done);
+ const dk=r=>r.dl||1e9; // EDF key: no deadline = least urgent
+ let order=[...live].sort((a,b)=>(S.mode=="edf"?dk(a)-dk(b):S.mode=="fcfs"?0:effP(S,a)-effP(S,b))||a.id-b.id);
+ if(S.mode=="full"){const turn=Math.floor(T/S.Q),g={}; // round robin: rotate equal-priority group every quantum
+  order.forEach(r=>(g[effP(S,r)]=g[effP(S,r)]||[]).push(r));order=[];
+  Object.keys(g).map(Number).sort((a,b)=>a-b).forEach(k=>{const a=g[k],s=turn%a.length;order.push(...a.slice(s),...a.slice(0,s));});}
+ // PHASE 1: reservation. A robot may only move into a cell that was EMPTY at the start of the tick and
+ // is not already reserved. This makes overlap and cell-swapping impossible by construction.
+ const occ={},claim={},moves=[];
+ live.forEach(r=>{r.pcell=r.idx>=0?r.path[r.idx]:null;r.prev=r.pcell;if(r.pcell)occ[K(r.pcell.x,r.pcell.y)]=r;});
+ for(const r of order){
+  if(r.idx>=0&&r.dw>0){r.dw--;r.state="running";r.cw=0;continue;} // dwelling inside shelf = holding the mutex
+  const c=r.path[r.idx+1],k=K(c.x,c.y),o=occ[k],cl=claim[k];
+  if(o||cl){r.state=r.idx<0?"ready":"waiting";r.cw++;r.wt++;note(S,r,o||cl,!!o);continue;}
+  claim[k]=r;moves.push(r);}
+ // PHASE 2: commit
+ for(const r of moves){r.prev=r.pcell||r.path[0];r.idx++;r.state="running";r.cw=0;r.lastB=null;
+  if(r.idx==r.si)r.dw=DWELL;
+  if(r.idx==r.path.length-1){r.done=true;r.fin=T;r.state="terminated";r.late=!!r.dl&&T>r.dl;}}
+ // self-check: no shared cell, no swap
+ const seen={};S.robots.filter(r=>r.idx>=0&&(!r.done||r.fin==T)).forEach(r=>{const c=r.path[r.idx],k=K(c.x,c.y);
+  if(seen[k])S.viol.push(`T${T}: R${r.id} and R${seen[k]} share cell ${k}`);seen[k]=r.id;});
+ moves.forEach(a=>moves.forEach(b=>{if(a.id<b.id&&a.pcell&&b.pcell&&a.pcell.x==b.path[b.idx].x&&a.pcell.y==b.path[b.idx].y
+  &&b.pcell.x==a.path[a.idx].x&&b.pcell.y==a.path[a.idx].y)S.viol.push(`T${T}: R${a.id} and R${b.id} swapped cells`);}));
+ S.shelves.forEach((s,i)=>{const h=S.robots.find(r=>r.shel==i&&!r.done&&r.idx==r.si&&r.si>=0);S.gantt[i].push(h?{id:h.id,col:h.col}:null);});}
+
+const finished=S=>S.robots.every(r=>r.done);
+function runEnd(S){while(!finished(S)&&S.tick<CAP)stepSim(S);return S;}
+function stats(S){const by={},ok=S.robots.filter(r=>r.state=="terminated");
+ ok.forEach(r=>{const b=by[r.pr]=by[r.pr]||{n:0,w:0,t:0};b.n++;b.w+=r.wt;b.t+=r.fin-r.t0;});
+ const n=ok.length||1;return{by,done:ok.length,total:S.robots.filter(r=>r.state!="unreachable").length,
+  aw:ok.reduce((a,r)=>a+r.wt,0)/n,at:ok.reduce((a,r)=>a+r.fin-r.t0,0)/n,late:S.robots.filter(r=>r.late).length};}
+
+// ===== task UI =====
+function drawTasks(){$("tl").innerHTML="";tasks.forEach((t,i)=>{const d=document.createElement("div");d.className="card";
+ d.innerHTML=`<div class="row"><span style="width:10px;height:10px;border-radius:3px;background:${COL[i%8]}"></span>
+ <input type="text" value="${t.name}" placeholder="task / shelf name"><button class="x">&times;</button></div>
+ <div class="row"><span>shelf</span><select class="sh" style="flex:1">${shelvesDef.map((s,j)=>`<option value="${j}" ${j==(t.sh||0)?"selected":""}>${s.name}</option>`).join("")}</select></div>
+ <div class="row"><span>prio</span><select class="pr">${[1,2,3,4].map(p=>`<option ${p==t.pr?"selected":""}>${p}</option>`).join("")}</select>
+ <span>n</span><input type="number" min="1" max="8" value="${t.n}"><span>due</span><input type="number" min="0" max="99" value="${t.dl||0}" title="deadline in ticks after arrival, 0 = none"></div>`;
+ const[nm,sel,shs]=[d.querySelector("input[type=text]"),d.querySelector("select.pr"),d.querySelector("select.sh")],[num,due]=d.querySelectorAll("input[type=number]");
+ shs.onchange=()=>t.sh=+shs.value;nm.oninput=()=>t.name=nm.value;sel.onchange=()=>t.pr=+sel.value;num.oninput=()=>t.n=Math.max(1,+num.value||1);due.oninput=()=>t.dl=Math.max(0,+due.value||0);
+ d.querySelector(".x").onclick=()=>{if(tasks.length>1){tasks.splice(i,1);drawTasks();}};$("tl").appendChild(d);});$("ot").innerHTML=tasks.map((t,i)=>`<option value="${i}">${t.name||"Task "+(i+1)}</option>`).join("");}
+$("add").onclick=()=>{if(tasks.length<8){tasks.push({name:"New task",pr:2,n:1,sh:0});drawTasks();}};drawTasks();
+
+// ===== rendering =====
+const cv=$("cv"),cx=cv.getContext("2d"),PAD=36,CELL=(560-PAD*2)/(G-1);
+const gx=x=>PAD+x*CELL,gy=y=>560-PAD-y*CELL;
+function sq(x,y,fill,stroke,label,lc){const h=CELL*.4;cx.fillStyle=fill;cx.fillRect(gx(x)-h,gy(y)-h,h*2,h*2);
+ cx.strokeStyle=stroke;cx.lineWidth=1.5;cx.strokeRect(gx(x)-h,gy(y)-h,h*2,h*2);
+ if(label){cx.fillStyle=lc;cx.font="10px Segoe UI";cx.textAlign="center";cx.fillText(label,gx(x),gy(y)-h-4);}}
+function marker(p,c,l){cx.fillStyle=c;cx.beginPath();cx.moveTo(gx(p.x)-14,gy(p.y)+10);cx.lineTo(gx(p.x),gy(p.y)-12);cx.lineTo(gx(p.x)+14,gy(p.y)+10);cx.fill();
+ cx.fillStyle=c;cx.font="10px Segoe UI";cx.textAlign="center";cx.fillText(l,gx(p.x),gy(p.y)+26);}
+function draw(now){cx.clearRect(0,0,560,560);cx.strokeStyle="#1b2530";cx.lineWidth=1;
+ for(let i=0;i<G;i++){cx.beginPath();cx.moveTo(gx(i),gy(0));cx.lineTo(gx(i),gy(G-1));cx.stroke();cx.beginPath();cx.moveTo(gx(0),gy(i));cx.lineTo(gx(G-1),gy(i));cx.stroke();}
+ obst.forEach((n,k)=>{const[x,y]=k.split(",").map(Number);sq(x,y,"#2b2f36","#556072",n,"#8a97a6");});
+ marker(DOCK,"#ffb020","Dock");marker(OUT,"#3ddc97","Loadout");
+ (S?S.shelves:shelvesDef).forEach(s=>sq(s.x,s.y,"#1f2a36","#4dd6d0",s.name,"#4dd6d0"));
+ if(S){const p=running?Math.min(1,(now-last)/tickMs):1;
+  S.robots.forEach(r=>{if(r.idx<0||(r.done&&r.fin!=S.tick))return;const c=r.path[r.idx],v=r.prev||c;
+   const x=gx(v.x+(c.x-v.x)*p),y=gy(v.y+(c.y-v.y)*p);
+   cx.beginPath();cx.arc(x,y,14,0,7);cx.fillStyle=r.col;cx.fill();cx.lineWidth=2.5;
+   cx.strokeStyle=r.state=="waiting"?"#ffb020":r.dw>0?"#4dd6d0":"#fff";cx.stroke();
+   cx.fillStyle="#fff";cx.font="bold 10px Consolas";cx.textAlign="center";cx.fillText(`R${r.id} P${r.pr}`,x,y-19);});}}
+
+function panels(){if(!S)return;const st=stats(S),R=S.robots;
+ $("log").innerHTML=S.log.length?S.log.map(l=>`<div>${l}</div>`).join(""):"No conflicts yet.";
+ $("pcb").innerHTML="<table><tr><th>PID</th><th>task</th><th>prio (eff)</th><th>state</th></tr>"+R.map(r=>
+  `<tr><td>R${r.id}</td><td>${S.shelves[r.shel].name}</td><td>P${r.pr}${effP(S,r)!=r.pr?` (${effP(S,r)})`:""}</td><td>${r.state}</td></tr>`).join("")+"</table>";
+ $("stats").innerHTML=`delivered ${st.done}/${st.total} &middot; tick ${S.tick} &middot; throughput ${(st.done/Math.max(1,S.tick)).toFixed(2)}/tick &middot; missed deadlines ${st.late}`+
+  Object.keys(st.by).sort().map(p=>{const b=st.by[p];return `<div>P${p}: avg wait ${(b.w/b.n).toFixed(1)}, turnaround ${(b.t/b.n).toFixed(1)} (${b.n} done)</div>`;}).join("");
+ $("chk").innerHTML=S.viol.length?`<span class="bad">${S.viol.length} VIOLATION(S):</span><br>${S.viol.slice(0,4).join("<br>")}`:'<span class="ok">No overlaps or swaps so far.</span>';
+ const gt=$("gt"),g=gt.getContext("2d"),rows=S.shelves.length,h=rows*16+6;gt.height=h;g.clearRect(0,0,400,h);
+ const w=Math.min(8,320/Math.max(S.tick,40));g.font="10px Segoe UI";
+ S.gantt.forEach((row,i)=>{g.fillStyle="#7f92a3";g.textAlign="left";g.fillText(S.shelves[i].name.slice(0,9),0,i*16+12);
+  row.forEach((c,t)=>{if(c){g.fillStyle=c.col;g.fillRect(70+t*w,i*16+3,Math.max(1,w-1),11);}});});}
+
+function loop(now){if(S&&running&&now-last>=tickMs){if(!finished(S)){stepSim(S);panels();}else running=false;last=now;}draw(now);requestAnimationFrame(loop);}
+
+// ===== controls =====
+function dispatch(){if(!shelvesDef.length){alert("Place at least one shelf first.");return;}const pool=+$("pool").value||5,Q=+$("q").value||3;
+ S=makeSim(tasks,pool,$("mode").value,obst,Q);running=true;last=performance.now();
+ const names=tasks.map((t,i)=>`<div>P${t.pr} ${t.name} &rarr; ${S.shelves[t.sh]?S.shelves[t.sh].name:"?"}: ${S.alloc[i]}/${t.n}${S.alloc[i]<t.n?' <span class="bad">(short)</span>':""}</div>`).join("");
+ const un=S.robots.some(r=>r.state=="unreachable")?'<div class="bad">Some robots have no free route (obstacles)</div>':"";
+ $("alloc").innerHTML=names+un;panels();}
+$("go").onclick=dispatch;
+$("pause").onclick=()=>{running=!running;last=performance.now();$("pause").textContent=running?"Pause":"Resume";};
+$("step").onclick=()=>{if(S&&!finished(S)){running=false;stepSim(S);panels();last=performance.now();$("pause").textContent="Resume";}};
+$("reset").onclick=()=>{S=null;running=false;$("log").textContent="Dispatch to start.";$("pcb").innerHTML="";$("stats").innerHTML="";$("alloc").textContent="Dispatch to see allocation.";$("chk").textContent="No violations.";};
+$("spd").oninput=e=>tickMs=+e.target.value;
+function setMode(m){placing=placing==m?null:m;$("obs").classList.toggle("on",placing=="obs");$("shl").classList.toggle("on",placing=="shelf");cv.style.cursor=placing?"crosshair":"default";
+ $("hint").textContent=placing=="shelf"?"Click an empty cell (columns 1-8, rows 3-7) to add a named shelf; click a shelf to remove it.":placing=="obs"?"Click a cell to add or remove a named obstacle.":"";}
+$("obs").onclick=()=>setMode("obs");$("shl").onclick=()=>setMode("shelf");
+$("clr").onclick=()=>obst.clear();
+cv.onclick=e=>{if(!placing)return;const r=cv.getBoundingClientRect(),px=(e.clientX-r.left)*560/r.width,py=(e.clientY-r.top)*560/r.height;
+ const x=Math.round((px-PAD)/CELL),y=Math.round((560-PAD-py)/CELL),k=K(x,y);
+ if(x<0||y<0||x>=G||y>=G||(x==DOCK.x&&y==DOCK.y)||(x==OUT.x&&y==OUT.y))return;
+ const si=shelvesDef.findIndex(s=>s.x==x&&s.y==y);
+ if(placing=="shelf"){
+  if(si>=0){shelvesDef.splice(si,1);tasks.forEach(t=>{if(t.sh==si)t.sh=0;else if(t.sh>si)t.sh--;});}
+  else{if(x<1||x>8||y<3||y>7||obst.has(k)){alert("Shelves must be in columns 1-8, rows 3-7 (so robots can reach them) and not on an obstacle.");return;}
+   const nm="Shelf "+(shelvesDef.length+1);shelvesDef.push({name:prompt("Name this shelf:",nm)||nm,x,y});}
+  drawTasks();return;}
+ if(si>=0)return; // obstacles can't sit on a shelf
+ if(obst.has(k))obst.delete(k);else obst.set(k,prompt("Label this obstacle (optional):","")||"");};
+
+$("cmp").onclick=()=>{if(!shelvesDef.length)return;const rows=["fcfs","pri","full","edf"].map(m=>{const s=runEnd(makeSim(tasks,+$("pool").value||5,m,obst,+$("q").value||3)),st=stats(s);
+  const top=Math.min(...s.robots.map(r=>r.pr)),hp=s.robots.filter(r=>r.pr==top&&r.state=="terminated");
+  return{m,aw:st.aw,at:st.at,hp:hp.reduce((a,r)=>a+r.wt,0)/(hp.length||1),mk:s.tick,v:s.viol.length,lt:s.robots.filter(r=>r.late).length};});
+ const mx=Math.max(...rows.map(r=>r.hp),1),nm={fcfs:"FCFS",pri:"Priority only",full:"Priority+aging+RR",edf:"EDF (deadlines)"};
+ $("cmpout").innerHTML="<table><tr><th>algorithm</th><th>avg wait</th><th>avg turnaround</th><th>wait of top-priority robots</th><th>finish tick</th><th>missed deadlines</th><th>violations</th></tr>"+
+  rows.map(r=>`<tr><td>${nm[r.m]}</td><td>${r.aw.toFixed(1)}</td><td>${r.at.toFixed(1)}</td><td>${r.hp.toFixed(1)} <span class="bar" style="width:${r.hp/mx*120}px;background:var(--a)"></span></td><td>${r.mk}</td><td>${r.lt}</td><td>${r.v}</td></tr>`).join("")+"</table>";};
+
+$("tst").onclick=()=>{if(!shelvesDef.length)return;let viol=0,stuck=0,N=300,rnd=n=>Math.floor(Math.random()*n);
+ for(let t=0;t<N;t++){const tk=Array.from({length:1+rnd(6)},(_,i)=>({name:"T"+i,pr:1+rnd(4),n:1+rnd(4),dl:rnd(2)?20+rnd(30):0,sh:rnd(shelvesDef.length)})),ob=new Map();
+  for(let o=rnd(5);o>0;o--){const x=rnd(G),y=rnd(G);if(!shelvesDef.some(p=>p.x==x&&p.y==y)&&!(x==0&&y==2)&&!(x==9&&y==8))ob.set(K(x,y),"");}
+  const s=runEnd(makeSim(tk,3+rnd(8),["fcfs","pri","full","edf"][rnd(4)],ob,1+rnd(5)));
+  viol+=s.viol.length;if(!finished(s))stuck++;}
+ $("tout").innerHTML=`${N} random scenarios (random tasks, priorities, obstacles, algorithms):<br>overlap/swap violations: <b class="${viol?"bad":"ok"}">${viol}</b><br>scenarios with stuck robots: <b class="${stuck?"bad":"ok"}">${stuck}</b>`;};
+
+$("csv").onclick=()=>{if(!S)return;const rows=["robot,task,priority,wait_ticks,turnaround,missed_deadline"].concat(S.robots.map(r=>[r.id,S.shelves[r.shel].name,r.pr,r.wt,r.done?r.fin-r.t0:"",r.late?1:0].join(",")));
+ const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([rows.join("\n")],{type:"text/csv"}));a.download="warehouse_metrics.csv";a.click();};
+
+// live order: new robots join the running simulation (same scheduler, same collision rules)
+$("oadd").onclick=()=>{if(!S)return;const i=+$("ot").value,n=+$("on").value||1,t=tasks[i];
+ if(!t||i>=S.routes.length||!S.routes[i])return;const sh=S.shelves[S.rsh[i]];
+ for(let k=0;k<n;k++)S.robots.push(mkR(S.nid++,i,t.pr,S.routes[i],sh,t.dl||0,S.tick,S.rsh[i]));
+ S.log.unshift(`T${S.tick} NEW ORDER: ${n} x ${t.name} to ${sh.name} (P${t.pr})`);running=true;last=performance.now();$("pause").textContent="Pause";panels();};
+requestAnimationFrame(loop);
+</script></body></html>
